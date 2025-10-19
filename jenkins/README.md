@@ -27,22 +27,6 @@ The pipeline handles **build, test, containerization, security scanning, and aut
 
 ---
 
-## 📂 Project Structure
-
-src/
-├── components/
-│ ├── Board.tsx # Game board component
-│ ├── Square.tsx # Individual square component
-│ ├── ScoreBoard.tsx # Tracks X, O, and Draw scores
-│ └── GameHistory.tsx # Tracks game history with timestamps
-├── utils/
-│ └── gameLogic.ts # Game logic utilities
-├── App.tsx # Main application component
-└── main.tsx # Entry point
-jenkins/
-└── Jenkinsfile # Full CI/CD pipeline
-kubernetes/
-└── deployment.yaml # Kubernetes deployment manifest
 
 yaml
 Copy code
@@ -106,3 +90,4 @@ Focused entirely on Jenkins-driven DevSecOps practices
 
 🔖 Topics
 react typescript jenkins docker kubernetes helm argo-cd devsecops security ci-cd
+
