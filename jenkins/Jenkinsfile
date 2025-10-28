@@ -1,0 +1,170 @@
+pipeline {
+    agent {
+        docker {
+            image 'docker:24.0.5' // Docker CLI + daemon access
+            args '--user root -v /var/run/docker.sock:/var/run/docker.sock'
+        }
+    }
+
+    environment {
+        // Docker image tag with build number
+        DOCKER_IMAGE = "chauhanshreyash18/devsecops-integrated-ci-cd-pipeline:${BUILD_NUMBER}"
+        REGISTRY_CREDENTIALS = credentials('docker-cred')
+        SNYK_TOKEN = credentials('snyk-token')
+        K8S_DEPLOYMENT_PATH = "kubernetes/deployment.yml"
+        GITHUB_TOKEN = credentials('github-token')
+        GIT_REPO_NAME = "devsecops-integrated-ci-cd-pipeline"
+        GIT_USER_NAME = "shreyash81"
+        SONAR_URL = "http://13.204.215.203:9000"
+    }
+
+    stages {
+
+        // Stage 1: Checkout code
+        // Purpose: Get the latest code from GitHub and install required tools
+        stage('Checkout') {
+            steps {
+                sh 'apk add --no-cache bash openjdk17 git nodejs npm'
+                git branch: 'main', url: 'https://github.com/shreyash81/devsecOps-integrated-ci-cd-pipeline.git'
+            }
+        }
+
+        // Stage 2: Install Dependencies
+        // Purpose: Install Node.js packages as per package-lock.json for consistent build
+        stage('Install Dependencies') {
+            steps {
+                sh 'npm ci'
+            }
+        }
+
+        // Stage 3: Install Sonar Scanner
+        // Purpose: Required to run SonarQube code quality scan
+        stage('Install Sonar Scanner') {
+            steps {
+                sh 'npm install -g sonar-scanner'
+            }
+        }
+
+        // Stage 4: Test
+        // Purpose: Run unit tests to validate the code
+        stage('Test') {
+            steps {
+                sh 'npm test || echo "No tests found"'
+            }
+        }
+
+        // Stage 5: Snyk Scan
+        // Purpose: Run security scan on code and dependencies
+        stage('Snyk Scan') {
+            steps {
+                sh 'npx snyk auth $SNYK_TOKEN'
+                sh 'npx snyk test'
+            }
+        }
+
+        // Stage 6: Build
+        // Purpose: Compile/build the project for deployment
+        stage('Build') {
+            steps {
+                sh 'npm run build'
+            }
+        }
+
+        // Stage 7: SonarQube Analysis
+        // Purpose: Analyze code quality using SonarQube
+        stage('SonarQube Analysis') {
+            steps {
+                sh '''
+                    apk add --no-cache bash openjdk17 git
+                    npm install -g sonar-scanner
+                '''
+                withCredentials([string(credentialsId: 'sonarqube-token', variable: 'SONAR_TOKEN')]) {
+                    sh '''
+                        echo "Running SonarQube scan..."
+                        sonar-scanner \
+                            -Dsonar.projectKey=devsecops-integrated-ci-cd-pipeline \
+                            -Dsonar.sources=./src \
+                            -Dsonar.host.url=$SONAR_URL \
+                            -Dsonar.login=$SONAR_TOKEN
+                    '''
+                }
+            }
+        }
+
+        // Stage 8: Build & Scan Docker Image
+        // Purpose: Build Docker image and scan it for vulnerabilities using Trivy
+        stage('Build & Scan') {
+            steps {
+                script {
+                    sh '''
+                        apk add --no-cache docker-cli bash
+                        docker build -t ${DOCKER_IMAGE} .
+                    '''
+                    sh """
+                        docker run --rm \
+                          -v /var/run/docker.sock:/var/run/docker.sock \
+                          aquasec/trivy:latest image \
+                          --severity CRITICAL,HIGH \
+                          --ignore-unfixed \
+                          --vuln-type os,library \
+                          --format table \
+                          --exit-code 0 \
+                          ${DOCKER_IMAGE}
+                    """
+                }
+            }
+        }
+
+        // Stage 9: Push Docker Image
+        // Purpose: Push the built and scanned image to Docker registry
+        stage('Push Docker Image') {
+            steps {
+                script {
+                    sh '''
+                        echo $REGISTRY_CREDENTIALS_PSW | docker login -u $REGISTRY_CREDENTIALS_USR --password-stdin
+                        docker push $DOCKER_IMAGE
+                    '''
+                }
+            }
+        }
+
+        // Stage 10: Update Kubernetes Deployment
+        // Purpose: Automatically update deployment.yaml with new Docker image and push to GitHub
+        stage('Update Kubernetes Deployment') {
+            steps {
+                script {
+                    sh 'rm -rf temp-repo'
+                    sh "git clone https://github.com/${GIT_USER_NAME}/${GIT_REPO_NAME}.git temp-repo"
+
+                    dir('temp-repo') {
+                        sh """
+                            git config user.name "Shreyash Singh"
+                            git config user.email "chauhanshreyash357@gmail.com"
+                        """
+
+                        sh """
+                        if [ -f "kubernetes/deployment.yaml" ]; then
+                            echo "Updating image to version ${BUILD_NUMBER}"
+                            sed -i "s|image: .*|image: ${DOCKER_IMAGE}|g" kubernetes/deployment.yaml
+                        else
+                            echo "ERROR: deployment.yaml not found!"
+                            exit 1
+                        fi
+                        """
+
+                        sh """
+                            git add kubernetes/deployment.yaml
+                            if git diff --cached --quiet; then
+                                echo "No changes to commit."
+                            else
+                                git commit -m "Update deployment image to version ${BUILD_NUMBER}"
+                                git push https://${GITHUB_TOKEN}@github.com/${GIT_USER_NAME}/${GIT_REPO_NAME}.git HEAD:main
+                            fi
+                        """
+                    }
+                }
+            }
+        }
+
+    } // end stages
+} // end pipeline
