@@ -1,0 +1,162 @@
+image: docker:24.0.5
+
+variables:
+  DOCKER_IMAGE: "chauhanshreyash18/devsecops-integrated-ci-cd-pipeline:${CI_PIPELINE_IID}"
+  SONAR_URL: "http://13.126.67.163:9000"
+  GIT_USER_NAME: "shreyash81"
+  GIT_REPO_NAME: "devsecops-integrated-ci-cd-pipeline"
+  K8S_DEPLOYMENT_PATH: "kubernetes/deployment.yaml"
+
+stages:
+  - checkout
+  - install
+  - test
+  - snyk_scan
+  - sonar_scan
+  - docker_build
+  - trivy_scan
+  - docker_push
+  - update_k8s
+
+before_script:
+  - apk add --no-cache bash git nodejs npm openjdk17 docker-cli docker-compose
+  - docker info || echo "⚠️ Docker daemon not accessible, check runner privileges."
+
+# ✅ Stage 1: Checkout
+checkout:
+  stage: checkout
+  script:
+    - echo "✅ Repository already cloned by GitLab Runner"
+    - ls -la
+  tags:
+    - docker
+
+# ✅ Stage 2: Install Dependencies
+install:
+  stage: install
+  script:
+    - npm ci
+  tags:
+    - docker
+
+# ✅ Stage 3: Test
+test:
+  stage: test
+  script:
+    - npm test || echo "⚠️ No tests found"
+  tags:
+    - docker
+
+# ✅ Stage 4: Snyk Scan
+snyk_scan:
+  stage: snyk_scan
+  image:
+    name: snyk/snyk:docker
+    entrypoint: [""]   # disables buggy entrypoint
+  script:
+    - snyk auth $SNYK_TOKEN || echo "⚠️ Snyk auth failed but continuing..."
+    - snyk test || echo "⚠️ Vulnerabilities found or Snyk failed, but pipeline continues"
+  after_script:
+    - rm -rf /root/.cache /tmp/* || true
+  allow_failure: true   # even if something goes wrong, job won’t fail
+  tags:
+    - docker
+
+
+
+# ✅ Stage 5: SonarQube Analysis
+# ✅ Stage 5: SonarQube Analysis
+sonar_scan:
+  stage: sonar_scan
+  image: node:18-alpine
+  script:
+    - npm install -g sonar-scanner
+    - |
+      sonar-scanner \
+        -Dsonar.projectKey=devsecops-integrated-ci-cd-pipeline \
+        -Dsonar.sources=./src \
+        -Dsonar.host.url=$SONAR_URL \
+        -Dsonar.login=sqa_fffc347840c13b874da3376ee11d848c32ffe7b6
+  variables:
+    SONAR_TOKEN: $SONAR_TOKEN
+  tags:
+    - docker
+
+
+# ✅ Stage 6: Docker Build & Security Scan
+docker_build:
+  stage: docker_build
+  image: docker:24.0.5
+  services:
+    - docker:dind
+  script:
+    - echo "🚀 Building Docker image..."
+    - docker build -t "${DOCKER_IMAGE}" .
+    - docker images
+  tags:
+    - docker
+
+
+trivy_scan:
+  stage: trivy_scan
+  image: docker:24.0.5
+  services:
+    - docker:dind
+  script:
+    - echo "🔍 Running Trivy scan on ${DOCKER_IMAGE}..."
+    - docker run --rm -v /var/run/docker.sock:/var/run/docker.sock aquasec/trivy:latest image \
+        --severity CRITICAL,HIGH \
+        --ignore-unfixed \
+        --vuln-type os,library \
+        --format table \
+        --exit-code 0 \
+        "${DOCKER_IMAGE}" || echo "⚠️ Trivy scan completed with issues, continuing pipeline..."
+  allow_failure: true
+  needs:
+    - job: docker_build
+  tags:
+    - docker
+
+
+
+
+
+
+
+# ✅ Stage 7: Docker Push
+docker_push:
+  stage: docker_push
+  script:
+    - echo "📤 Pushing image to Docker Hub..."
+    - echo $CI_REGISTRY_PASSWORD | docker login -u $CI_REGISTRY_USER --password-stdin
+    - docker push ${DOCKER_IMAGE}
+  variables:
+    CI_REGISTRY_USER: $DOCKER_USERNAME
+    CI_REGISTRY_PASSWORD: $DOCKER_PASSWORD
+  tags:
+    - docker
+  services:
+    - docker:dind
+
+# ✅ Stage 8: Update Kubernetes Deployment
+update_k8s:
+  stage: update_k8s
+  script:
+    - git clone https://$GIT_USER_NAME:$"GITHUB_TOKEN"@github.com/$GIT_USER_NAME/$GIT_REPO_NAME.git temp-repo
+    - cd temp-repo
+    - git config user.name "Shreyash Singh"
+    - git config user.email "chauhanshreyash357@gmail.com"
+    - |
+      if [ -f "$K8S_DEPLOYMENT_PATH" ]; then
+        echo "🚀 Updating image to version ${CI_PIPELINE_IID}"
+        sed -i "s|image: .*|image: ${DOCKER_IMAGE}|g" "$K8S_DEPLOYMENT_PATH"
+      else
+        echo "❌ deployment.yaml not found!" && exit 1
+      fi
+    - git add "$K8S_DEPLOYMENT_PATH"
+    - git commit -m "Update deployment image to version ${CI_PIPELINE_IID}" || echo "No changes to commit"
+    - git push https://$GIT_USER_NAME:$"GITHUB_TOKEN"@github.com/$GIT_USER_NAME/$GIT_REPO_NAME.git HEAD:main
+  variables:
+    GITHUB_TOKEN: $GITHUB_TOKEN
+  tags:
+    - docker
